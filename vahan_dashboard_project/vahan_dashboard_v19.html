@@ -1352,6 +1352,14 @@ body.state-view .national-view-only { display: none; }
   background: var(--paper-soft);
   border: 1px solid var(--rule);
   padding: 10px 12px 12px;
+  /* v19 fix: panels are grid items (.grid-12 > .span-12 etc.); without
+     min-width:0 a wide child (an auto-layout .data-table, a heatmap grid)
+     forces the whole grid track wider than the viewport instead of
+     shrinking, which is the main cause of the mobile horizontal overflow.
+     overflow-x:auto then lets any genuinely wide content scroll inside its
+     own panel instead of blowing out the page. */
+  min-width: 0;
+  overflow-x: auto;
 }
 .panel-head {
   display: flex; align-items: baseline; justify-content: space-between;
@@ -1494,6 +1502,12 @@ svg.chart { display: block; width: 100%; height: auto; overflow: visible; }
   display: grid;
   font-size: 10px;
   margin-top: 4px;
+  /* v19 fix: month columns are `1fr`, but grid tracks still respect each
+     cell's content-based minimum width, so at narrow (mobile) viewports the
+     grid renders wider than its box and bleeds into the page's horizontal
+     scroll instead of shrinking. Let it scroll within its own box. */
+  max-width: 100%;
+  overflow-x: auto;
 }
 .hm-cell {
   padding: 4px 2px;
@@ -3829,7 +3843,12 @@ table.cmp-tbl td.maker-name:hover { color: var(--link); text-decoration: underli
         } else {
           rankSource = _sd.top_makers_per_year[String(y)] || [];
         }
-        rankSource.forEach(([maker, _]) => {
+        // v19 fix: rankSource rows are {maker, n} objects, not [maker, n]
+        // tuples — array-destructuring one threw "object is not iterable",
+        // which is why the state-view bump/slope/treemap/heatmap/
+        // small-multiples charts were all silently blank (caught by safeRun).
+        rankSource.forEach((r) => {
+          const maker = r.maker;
           // Compute that maker's monthly aggregate for the year, in cat/fuel scope
           let total = 0;
           const mmf = (_sd.monthly_by_maker[maker] || {});
@@ -4013,7 +4032,19 @@ table.cmp-tbl td.maker-name:hover { color: var(--link); text-decoration: underli
   const SVG_NS = 'http://www.w3.org/2000/svg';
   function el(tag, attrs, parent) {
     const e = document.createElementNS(SVG_NS, tag);
-    if (attrs) for (const k in attrs) if (attrs[k] != null) e.setAttribute(k, attrs[k]);
+    if (attrs) for (const k in attrs) {
+      let v = attrs[k];
+      if (v == null) continue;
+      // v19 fix: at narrow (mobile) viewports, several chart layouts compute
+      // negative width/height for <rect> elements (e.g. bar length =
+      // innerWidth - margins going negative when the host is too small).
+      // SVG rejects negative geometry attributes and logs a console error
+      // per occurrence, so clamp to 0 here — the single choke point through
+      // which every chart shape is created — instead of chasing each
+      // computation individually.
+      if ((k === 'width' || k === 'height') && typeof v === 'number' && v < 0) v = 0;
+      e.setAttribute(k, v);
+    }
     if (parent) parent.appendChild(e);
     return e;
   }
@@ -7317,6 +7348,15 @@ table.cmp-tbl td.maker-name:hover { color: var(--link); text-decoration: underli
     if (!host) return;
     if (STATE.view === 'anomalies') { host.classList.remove('has-content'); host.innerHTML = ''; return; }
 
+    // v19 fix (C1): filteredRows()/PAYLOAD.rows is the NATIONAL row-level
+    // dataset — it has no per-state column, so it can't be scoped to a
+    // state. Previously, selecting a state only changed the headline's
+    // *name* (spliced in below) while every number kept coming from this
+    // national dataset, so every state showed the identical national total.
+    // Route through the state-scoped payload when a specific state is active.
+    const _sd = currentStateData();
+    if (_sd) { renderLeadStoryState(_sd, host); return; }
+
     const rows = filteredRows();
     if (!rows.length) { host.classList.remove('has-content'); host.innerHTML = ''; return; }
 
@@ -7423,6 +7463,115 @@ table.cmp-tbl td.maker-name:hover { color: var(--link); text-decoration: underli
       `${rows.length} rows`,
       `${scopeStr.toUpperCase()}`,
       `${STATE.view === 'state' ? STATE.state : 'NATIONAL'}`,
+    ].map(s => `<span>${s}</span>`).join('<span class="sep">·</span>');
+
+    host.innerHTML = `
+      <div class="eyebrow"><span class="dot">●</span> Lead story · refreshes with filters</div>
+      <div class="lead-headline">${headline}</div>
+      ${deck ? `<div class="lead-deck">${deck}</div>` : ''}
+      <div class="lead-byline">${byline}</div>
+    `;
+    host.classList.add('has-content');
+  }
+
+  // v19 (C1 fix): state-scoped counterpart to renderLeadStory() above.
+  // Mirrors that function's structure/output but sources every figure from
+  // STATE_PAYLOAD.by_state[STATE.state] (sd) instead of the national
+  // row-level PAYLOAD.rows, so the headline is genuinely scoped to the
+  // selected state instead of showing the national total under its name.
+  function renderLeadStoryState(sd, host) {
+    // Monthly series for a given cat/fuel combo, restricted to this state.
+    function series(cat, fuel) {
+      if (cat !== 'all' && fuel !== 'all') return (sd.by_cat_fuel[cat] || {})[fuel] || {};
+      if (cat !== 'all') return sd.by_cat[cat] || {};
+      if (fuel !== 'all') return sd.by_fuel[fuel] || {};
+      return sd.monthly_total || {};
+    }
+    function sumRange(monthly, yMin, yMax) {
+      let s = 0;
+      for (const mon in monthly) {
+        const y = +mon.slice(0, 4);
+        if (y >= yMin && y <= yMax) s += monthly[mon];
+      }
+      return s;
+    }
+    const sumYear = (monthly, y) => sumRange(monthly, y, y);
+
+    const scopeSeries = series(STATE.cat, STATE.fuel);
+    const total = sumRange(scopeSeries, STATE.yearMin, STATE.yearMax);
+    if (!total) { host.classList.remove('has-content'); host.innerHTML = ''; return; }
+
+    const evTotal = STATE.fuel === 'EV' ? total : sumRange(series(STATE.cat, 'EV'), STATE.yearMin, STATE.yearMax);
+    const evPct = total > 0 ? 100 * evTotal / total : 0;
+
+    // YoY / CAGR — same logic as the national path, sourced from the state series.
+    let yoyText = '';
+    if (STATE.yearMin === STATE.yearMax && STATE.yearMin >= 2022) {
+      const yr = STATE.yearMin, prevYr = yr - 1;
+      const curT = sumYear(scopeSeries, yr);
+      const prevT = sumYear(scopeSeries, prevYr);
+      if (prevT > 0) {
+        const yoyValue = 100 * (curT - prevT) / prevT;
+        yoyText = `${yoyValue >= 0 ? '+' : ''}${yoyValue.toFixed(1)}% YoY vs ${prevYr}`;
+      }
+    } else if (STATE.yearMax - STATE.yearMin >= 1) {
+      const yMin = STATE.yearMin;
+      let yMax = STATE.yearMax;
+      if (yMax === PARTIAL_YEAR && yMax - 1 >= yMin) yMax = yMax - 1;
+      const first = sumYear(scopeSeries, yMin);
+      const last = sumYear(scopeSeries, yMax);
+      if (first > 0 && yMax !== yMin) {
+        const years = yMax - yMin;
+        const cagr = years > 0 ? (Math.pow(last / first, 1 / years) - 1) * 100 : 0;
+        yoyText = `${cagr >= 0 ? '+' : ''}${cagr.toFixed(1)}% CAGR ${yMin}–${yMax}`;
+      }
+    }
+
+    // Top maker + share. The state payload only carries maker rankings
+    // scoped along ONE dimension at a time (per cat, per fuel, or per
+    // year) — not cat+fuel combined — so when both a category and a fuel
+    // filter are active simultaneously there's no ranking whose scope
+    // matches `total` exactly; skip the top-maker figure in that case
+    // rather than risk showing a share that doesn't reconcile with total.
+    let makerRankSource = null;
+    if (STATE.cat !== 'all' && STATE.fuel === 'all') makerRankSource = sd.top_makers_per_cat[STATE.cat];
+    else if (STATE.cat === 'all' && STATE.fuel !== 'all') makerRankSource = sd.top_makers_per_fuel[STATE.fuel];
+    else if (STATE.cat === 'all' && STATE.fuel === 'all') makerRankSource = sd.top_makers_per_year[String(STATE.yearMax)];
+    const topMaker = (makerRankSource || [])[0] || null;
+    const topMakerName = topMaker ? topMaker.maker : null;
+    const topMakerShare = topMaker && total > 0 ? 100 * topMaker.n / total : 0;
+
+    // Top EV maker for the deck line (state payload has no cat-scoped EV
+    // ranking, so this is EV-wide for the state regardless of STATE.cat —
+    // same simplification renderStateReport's own KPI card already makes).
+    const topEv = (sd.top_makers_per_fuel.EV || [])[0] || null;
+
+    const scopeStr = (STATE.cat === 'all' ? 'all categories' : STATE.cat) +
+      (STATE.fuel === 'all' ? '' : ` · ${STATE.fuel}`);
+    const periodStr = STATE.yearMin === STATE.yearMax ? String(STATE.yearMin) : `${STATE.yearMin}–${STATE.yearMax}`;
+
+    const totalLabel = total >= 1e6 ? `${(total/1e6).toFixed(1)}M` : `${(total/1e3).toFixed(0)}k`;
+    let headline = `<strong>${STATE.state}</strong> registered <span class="mark">${totalLabel} ${scopeStr}</span> in ${periodStr}`;
+    if (yoyText) headline += `, ${yoyText}`;
+    if (topMakerName && topMakerShare > 0) {
+      headline += `; <strong>${topMakerName}</strong> leads with ${topMakerShare.toFixed(1)}% share`;
+    }
+    headline += '.';
+
+    let deck = '';
+    const deckParts = [];
+    if (evPct > 0.5 && STATE.fuel !== 'EV') {
+      deckParts.push(`EV penetration in this scope is <strong>${evPct.toFixed(1)}%</strong>`);
+    }
+    if (topEv && topEv.n > 0 && topEv.maker !== topMakerName) {
+      deckParts.push(`<strong>${topEv.maker}</strong> leads EV with ${fmtNC(topEv.n)} units`);
+    }
+    deck = deckParts.slice(0, 2).join('; ') + (deckParts.length > 0 ? '.' : '');
+
+    const byline = [
+      'AUTO-GENERATED',
+      `${scopeStr.toUpperCase()}`,
+      STATE.state,
     ].map(s => `<span>${s}</span>`).join('<span class="sep">·</span>');
 
     host.innerHTML = `
@@ -9951,8 +10100,12 @@ table.cmp-tbl td.maker-name:hover { color: var(--link); text-decoration: underli
     const sd = STATE_PAYLOAD.by_state[STATE.state];
     if (!sd) return;
     document.getElementById('srTitle').textContent = STATE.state;
+    // v19 fix: STATE_PAYLOAD.meta has no `failed_scrapes` field in the current
+    // payload shape, so guard it instead of assuming it's always an array —
+    // an unguarded `.some()` here threw and aborted the rest of this render.
+    const failedScrapes = (STATE_PAYLOAD.meta && STATE_PAYLOAD.meta.failed_scrapes) || [];
     document.getElementById('srSubtitle').textContent =
-      'State-focused report · ' + (STATE_PAYLOAD.meta.failed_scrapes.some(f => f.state === STATE.state) ? '⚠ some scrape gaps' : '');
+      'State-focused report · ' + (failedScrapes.some(f => f.state === STATE.state) ? '⚠ some scrape gaps' : '');
     // KPIs: 2025 total, EV%, YoY, top maker, EV maker
     const latest = '2025';
     const total = sd.annual_total[latest] || 0;
@@ -9960,8 +10113,14 @@ table.cmp-tbl td.maker-name:hover { color: var(--link); text-decoration: underli
     const yoy = total_prev > 0 ? (total - total_prev) / total_prev : null;
     const ev = sd.annual_ev[latest] || 0;
     const ev_pen = sd.annual_ev_pen[latest] || 0;
-    const top_maker = (sd.top_makers_per_year[latest] || [])[0] || ['—', 0];
-    const top_ev_maker = (sd.top_makers_per_fuel.EV || [])[0] || ['—', 0];
+    // v19 fix: top_makers_per_year / top_makers_per_fuel rows are
+    // {maker, n} objects, not [name, count] tuples — normalize here so the
+    // KPI cards below (which read top_maker[0]/[1]) get real values instead
+    // of undefined/NaN once the crash above no longer masks this code path.
+    const top_maker_raw = (sd.top_makers_per_year[latest] || [])[0];
+    const top_maker = top_maker_raw ? [top_maker_raw.maker, top_maker_raw.n] : ['—', 0];
+    const top_ev_maker_raw = (sd.top_makers_per_fuel.EV || [])[0];
+    const top_ev_maker = top_ev_maker_raw ? [top_ev_maker_raw.maker, top_ev_maker_raw.n] : ['—', 0];
     document.getElementById('srKpis').innerHTML = [
       `<div class="kpi"><div class="kpi-label">2025 registrations</div><div class="kpi-value">${fmtNC(total)}</div>${yoy != null ? `<div class="kpi-delta ${yoy>=0?'up':'down'}">${(yoy*100>=0?'+':'')}${(yoy*100).toFixed(1)}% YoY</div>` : ''}</div>`,
       `<div class="kpi"><div class="kpi-label">EV registrations</div><div class="kpi-value">${fmtNC(ev)}</div><div class="kpi-delta">${(ev_pen*100).toFixed(2)}% penetration</div></div>`,
@@ -10039,10 +10198,11 @@ table.cmp-tbl td.maker-name:hover { color: var(--link); text-decoration: underli
     const yr = '2025';
     const rows = sd.top_makers_per_year[yr] || [];
     let html_ = '<table class="data-table"><thead><tr><th>#</th><th>Maker</th><th class="num">Reg 2025</th><th class="num">% of state</th></tr></thead><tbody>';
-    const total = rows.reduce((s, r) => s + r[1], 0) || 1;
+    // v19 fix: rows are {maker, n} objects, not [name, count] tuples.
+    const total = rows.reduce((s, r) => s + r.n, 0) || 1;
     rows.forEach((r, i) => {
-      const pct = r[1] / total * 100;
-      html_ += `<tr><td>${i+1}</td><td><span class="maker-link" data-drill="${escapeHtml(r[0])}">${escapeHtml(r[0])}</span></td><td class="num">${fmtNC(r[1])}</td><td class="num">${pct.toFixed(1)}%</td></tr>`;
+      const pct = r.n / total * 100;
+      html_ += `<tr><td>${i+1}</td><td><span class="maker-link" data-drill="${escapeHtml(r.maker)}">${escapeHtml(r.maker)}</span></td><td class="num">${fmtNC(r.n)}</td><td class="num">${pct.toFixed(1)}%</td></tr>`;
     });
     html_ += '</tbody></table>';
     host.innerHTML = html_;
@@ -13466,7 +13626,11 @@ table.cmp-tbl td.maker-name:hover { color: var(--link); text-decoration: underli
     safeRun('renderMakers', () => (typeof renderMakers === 'function') && renderMakers());
     if (STATE.view === 'state') {
       if (_hasSpecificState()) {
-        renderStateReport();
+        // v19: defense-in-depth — a future data-shape regression here should
+        // degrade gracefully (like every other panel via safeRun) instead of
+        // throwing uncaught and silently leaving stale national numbers on
+        // screen.
+        safeRun('renderStateReport', renderStateReport);
         renderSrMakerShareEvol();
       } else {
         // v13: hero canvas (always)
