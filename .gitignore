@@ -1,0 +1,13 @@
+.runtime/
+dist/
+azure-upload/
+__MACOSX/
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+
+vahan_dashboard_project/logs/
+vahan_dashboard_project/archive/
+vahan_dashboard_project/scripts/__pycache__/
+solar_dcr_scrape/__pycache__/
