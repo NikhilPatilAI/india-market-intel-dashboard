@@ -70,9 +70,13 @@ def month_groups(month_values: list[str]) -> dict[str, list[str]]:
 
 
 def default_months(today: date) -> list[str]:
+    """Cover the current month plus two prior months for publication lag."""
+    months = []
     current = date(today.year, today.month, 1)
-    prev = previous_month(today)
-    return [prev.strftime("%Y-%m"), current.strftime("%Y-%m")]
+    for _ in range(3):
+        months.append(current.strftime("%Y-%m"))
+        current = previous_month(current)
+    return list(reversed(months))
 
 
 def run_worker(command: list[str], log_path: Path) -> int:
@@ -143,10 +147,13 @@ def scraper_command(dataset: str, year: str, months: list[str], states: list[str
         str(args.retry_sleep),
         "--compile-every",
         "0",
+        "--skip-compile",
         "--max-consecutive-failures",
         "0",
         "--overwrite",
     ]
+    if args.headful:
+        command.append("--headful")
     return command
 
 
@@ -190,7 +197,11 @@ def audit_raw(dataset: str) -> dict[str, object]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--months", nargs="*", help="YYYY-MM values. Defaults to previous and current month.")
+    parser.add_argument(
+        "--months",
+        nargs="*",
+        help="YYYY-MM values. Defaults to current month and two prior months to cover portal publication lag.",
+    )
     parser.add_argument("--datasets", nargs="*", choices=sorted(DATASETS), default=list(DATASETS))
     parser.add_argument("--delay", type=float, default=0.30)
     parser.add_argument("--attempts", type=int, default=4)
@@ -199,6 +210,8 @@ def main() -> None:
     parser.add_argument("--retry-sleep", type=float, default=8.0)
     parser.add_argument("--sequential", action="store_true",
                         help="Run one state batch at a time instead of three parallel batches.")
+    parser.add_argument("--headful", action="store_true",
+                        help="Use headed Chrome (required when VAHAN blocks headless sessions).")
     parser.add_argument("--skip-finalize", action="store_true",
                         help="Skip rebuilding/validating the single standard consolidated CSV.")
     args = parser.parse_args()

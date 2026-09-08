@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -80,16 +81,34 @@ def slug(value: str) -> str:
 
 def build_driver(headful: bool) -> webdriver.Chrome:
     options = Options()
-    chrome = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
-    if chrome.exists():
-        options.binary_location = str(chrome)
+    chrome_bin = os.environ.get("CHROME_BIN")
+    if chrome_bin:
+        options.binary_location = chrome_bin
+    else:
+        chrome = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+        if chrome.exists():
+            options.binary_location = str(chrome)
     if not headful:
         options.add_argument("--headless=new")
     options.add_argument("--window-size=1600,1100")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--no-sandbox")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--remote-debugging-port=0")
     options.add_argument("--disable-blink-features=AutomationControlled")
     return webdriver.Chrome(options=options)
+
+
+def assert_portal_access(driver: webdriver.Chrome) -> None:
+    """Fail quickly when VAHAN returns its access-denied page."""
+    title = (driver.title or "").strip().lower()
+    source = (driver.page_source or "").lower()
+    if title == "access forbidden" or "you don’t have permission to access this page" in source \
+            or "you don't have permission to access this page" in source:
+        raise RuntimeError(
+            "VAHAN portal returned Access Forbidden. Use a headed browser session "
+            "(VAHAN_HEADFUL=true); do not publish this run as a successful refresh."
+        )
 
 
 class Harvester:
@@ -234,6 +253,7 @@ class Harvester:
         for attempt in range(3):
             try:
                 self.driver.get(URL)
+                assert_portal_access(self.driver)
                 self.wait.until(EC.presence_of_element_located((By.ID, "yaxisVar_input")))
                 self.wait_idle()
                 report = REPORTS[self.job.report]
