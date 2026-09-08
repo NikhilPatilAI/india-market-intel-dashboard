@@ -2555,13 +2555,13 @@ table.cmp-tbl td.maker-name:hover { color: var(--link); text-decoration: underli
 
     <div class="meta-block">
       <strong>Source</strong>
-      VAHAN dashboard, scraped 14 May 2026.
+      VAHAN dashboard, data as of <span id="metaFreshnessMonth">14 May 2026</span>.
       Calendar years; maker × fuel filtered.
     </div>
 
     <details>
       <summary>Caveats &amp; methodology</summary>
-      <p>2026 is partial; the trailing month (May) is excluded from comparisons.</p>
+      <p><span id="metaPartialMonthNote">2026 is partial; the trailing month (May) is excluded from comparisons.</span></p>
       <p>VAHAN's <em>EV</em> bucket excludes hybrids: <em>Hybrid</em> (Plug-in/Strong Hybrid/Petrol-Hybrid) is its own group; <em>EV</em> is BEV + Fuel Cell only.</p>
       <p><strong>v9 uses actual VAHAN vehicle categories.</strong> 17 VAHAN codes are mapped to 4 buckets: <em>2W</em> = 2WIC + 2WN + 2WT; <em>3W</em> = 3WIC + 3WN + 3WT; <em>4W</em> = 4WIC + LMV + LPV + MPV + HPV (cars/SUVs/buses); <em>CV</em> = LGV + MGV + HGV + HMV + MMV + OTH (goods carriers, tractors). The dominant-maker classifier used in v8 has been retired — every maker now appears in its true categories per month.</p>
       <p>Per-category monthly TOTALS are real (from a fresh maker × category × month scrape). Per-category × per-fuel × per-month cross-product is <strong>not</strong> in source — charts that need that combination show an info note rather than synthetic data. Annual EV penetration by 2W and 4W is real (from the annual maker × cat × fuel scrape).</p>
@@ -13671,7 +13671,36 @@ table.cmp-tbl td.maker-name:hover { color: var(--link); text-decoration: underli
       renderAnomalies();
     }
   }
+  function syncFreshnessLabel() {
+    try {
+      const SP = window.__STATE_PAYLOAD__ || null;
+      const meta = SP && SP.meta;
+      if (!meta) return;
+      const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+      const monthLabel = (ym) => {
+        const parts = String(ym || '').split('-');
+        const y = parts[0], m = parseInt(parts[1], 10);
+        if (!y || !m || m < 1 || m > 12) return ym;
+        return `${MONTH_NAMES[m - 1]} ${y}`;
+      };
+      const months = Array.isArray(meta.months) ? meta.months.slice().sort() : [];
+      const latestMonth = meta.partial_month || months[months.length - 1];
+      const freshnessEl = document.getElementById('metaFreshnessMonth');
+      if (freshnessEl && latestMonth) freshnessEl.textContent = monthLabel(latestMonth);
+
+      const partialNoteEl = document.getElementById('metaPartialMonthNote');
+      if (partialNoteEl && latestMonth) {
+        const partialYear = latestMonth.split('-')[0];
+        partialNoteEl.textContent =
+          `${partialYear} is partial; the trailing month (${monthLabel(latestMonth).split(' ')[0]}) is excluded from comparisons.`;
+      }
+    } catch (err) {
+      console.warn('[render] syncFreshnessLabel threw:', err);
+    }
+  }
+
   function boot() {
+    syncFreshnessLabel();
     setupFilters();
     setupStatePicker();
     populateCompareAdd();
