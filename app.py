@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import json
 import os
 import shutil
@@ -593,9 +594,35 @@ def custom_script_steps(body: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
+_compressed_cache: dict[Path, tuple[float, bytes]] = {}
+
+
+def gzip_cached(path: Path) -> bytes:
+    """Gzip a file's bytes, cached by mtime so large dashboards aren't
+    recompressed on every request."""
+    mtime = path.stat().st_mtime
+    cached = _compressed_cache.get(path)
+    if cached and cached[0] == mtime:
+        return cached[1]
+    compressed = gzip.compress(path.read_bytes(), compresslevel=6)
+    _compressed_cache[path] = (mtime, compressed)
+    return compressed
+
+
+def serve_html_file(path: Path) -> Response:
+    if not path.exists():
+        abort(404)
+    if "gzip" in request.headers.get("Accept-Encoding", ""):
+        response = Response(gzip_cached(path), mimetype="text/html")
+        response.headers["Content-Encoding"] = "gzip"
+        response.headers["Vary"] = "Accept-Encoding"
+        return response
+    return send_file(path)
+
+
 @app.get("/")
 def index() -> Response:
-    return send_file(WORKSPACE_ROOT / "index.html")
+    return serve_html_file(WORKSPACE_ROOT / "index.html")
 
 
 @app.after_request
@@ -609,9 +636,56 @@ def prevent_stale_dashboard_cache(response: Response) -> Response:
     return response
 
 
+@app.after_request
+def add_security_headers(response: Response) -> Response:
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "SAMEORIGIN"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src https://fonts.gstatic.com; "
+        "img-src 'self' data:; "
+        "connect-src 'self'; "
+        "frame-ancestors 'self'"
+    )
+    return response
+
+
+@app.after_request
+def compress_text_response(response: Response) -> Response:
+    """Manual gzip for text responses; avoids adding a new dependency."""
+    accept_encoding = request.headers.get("Accept-Encoding", "")
+    mimetype = (response.mimetype or "").lower()
+    compressible = mimetype in {"text/html", "application/json", "text/javascript", "application/javascript", "text/css"}
+    if (
+        "gzip" not in accept_encoding
+        or not compressible
+        or response.direct_passthrough
+        or "Content-Encoding" in response.headers
+        or response.status_code >= 300
+    ):
+        return response
+    body = response.get_data()
+    if len(body) < 1024:
+        return response
+    response.set_data(gzip.compress(body, compresslevel=6))
+    response.headers["Content-Encoding"] = "gzip"
+    response.headers["Content-Length"] = str(len(response.get_data()))
+    response.headers.setdefault("Vary", "Accept-Encoding")
+    return response
+
+
 @app.get("/api/health")
 def health() -> Response:
-    return jsonify({"ok": True, "time": utc_now(), **dashboard_metadata()})
+    meta = dashboard_metadata()
+    public_dashboards = {
+        name: {"exists": info["exists"], "updated_at": info["updated_at"]}
+        for name, info in meta["dashboards"].items()
+    }
+    return jsonify({"ok": True, "time": utc_now(), "dashboards": public_dashboards})
 
 
 @app.get("/api/jobs")
@@ -694,7 +768,7 @@ def public_files(filename: str) -> Response:
     normalized = filename.replace("\\", "/")
     if normalized not in PUBLIC_FILES:
         abort(404)
-    return send_from_directory(WORKSPACE_ROOT, normalized)
+    return serve_html_file(WORKSPACE_ROOT / normalized)
 
 
 def maybe_start_scheduler() -> None:
