@@ -17,6 +17,10 @@ on:
         options:
           - solar
           - vahan
+      months:
+        description: "VAHAN only: space-separated YYYY-MM values to backfill (e.g. '2026-06'). Leave blank for the default current+2-prior-months refresh."
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -70,12 +74,16 @@ jobs:
     steps:
       - name: Trigger VAHAN recent scrape and wait for completion
         shell: bash
+        env:
+          VAHAN_MONTHS: ${{ github.event.inputs.months }}
         run: |
           set -euo pipefail
+          BODY="$(python -c 'import json, os; months = os.environ.get("VAHAN_MONTHS", "").split(); print(json.dumps({"months": months} if months else {}))')"
+          echo "Request body: $BODY"
           RESPONSE="$(curl -fSs --max-time 30 -X POST "$APP_BASE_URL/api/scrape/vahan/recent" \
             -H "Authorization: Bearer ${{ secrets.SCRAPER_ADMIN_TOKEN }}" \
             -H "Content-Type: application/json" \
-            --data '{}')"
+            --data "$BODY")"
           JOB_ID="$(python -c 'import json,sys; print(json.load(sys.stdin)["id"])' <<<"$RESPONSE")"
           echo "VAHAN job queued: $JOB_ID"
 

@@ -52,6 +52,16 @@ DATASETS = {
         "raw_dir": "state_category_fuel_month_raw",
         "csv": "state_category_fuel_month_long.csv",
     },
+    "all_state_maker_month": {
+        "script": "scrape_vahan_all_state_maker_monthly.py",
+        "csv": "all_state_maker_month_long.csv",
+        # This dataset has no per-state raw partitions and no --months axis
+        # (X-Axis is "Month Wise", so one --years call returns every month of
+        # that year in one report). It also rewrites its whole output from
+        # whatever --years is passed, so it needs its own handling in main()
+        # rather than the state-batch/compile pattern the other 3 datasets use.
+        "whole_year": True,
+    },
 }
 
 
@@ -157,6 +167,40 @@ def scraper_command(dataset: str, year: str, months: list[str], states: list[str
     return command
 
 
+def all_state_maker_month_command(years: list[str], args: argparse.Namespace) -> list[str]:
+    command = [
+        sys.executable,
+        str(PROJECT_ROOT / "scripts" / "scrape_vahan_all_state_maker_monthly.py"),
+        "--years",
+        *years,
+        "--output-dir",
+        str(DATA_DIR),
+        "--delay",
+        str(args.delay),
+        "--wait-seconds",
+        str(args.wait_seconds),
+        "--page-timeout",
+        str(args.page_timeout),
+    ]
+    if args.headful:
+        command.append("--headful")
+    return command
+
+
+def existing_all_state_maker_month_years() -> list[str]:
+    """This scraper rewrites its whole payload from --years each run, so we
+    have to pass back whatever years it already covers or a routine refresh
+    would silently drop them."""
+    payload_path = DATA_DIR / "all_state_maker_month.json"
+    if not payload_path.exists():
+        return []
+    try:
+        data = json.loads(payload_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return []
+    return [str(year) for year in data.get("years", [])]
+
+
 def compile_command(dataset: str) -> list[str]:
     config = DATASETS[dataset]
     command = [
@@ -223,6 +267,17 @@ def main() -> None:
 
     for dataset in args.datasets:
         print(f"\n=== {dataset} ===", flush=True)
+
+        if DATASETS[dataset].get("whole_year"):
+            target_years = sorted(set(existing_all_state_maker_month_years()) | set(groups.keys()))
+            log_path = LOG_DIR / f"refresh_{dataset}_{'_'.join(target_years)}.log"
+            print(f"Running {dataset} for years: {', '.join(target_years)}", flush=True)
+            code = run_worker(all_state_maker_month_command(target_years, args), log_path)
+            if code:
+                raise RuntimeError(f"{log_path} exited {code}")
+            print(json.dumps({"years_covered": target_years}, indent=2), flush=True)
+            continue
+
         for year, month_numbers in sorted(groups.items()):
             commands = []
             for batch_name, states in BATCHES.items():
