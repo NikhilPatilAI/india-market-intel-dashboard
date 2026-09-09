@@ -102,7 +102,18 @@ def ensure_runtime_workspace() -> None:
             return
         deployed_version = version_marker.read_text(encoding="utf-8").strip() if version_marker.exists() else ""
         if image_version and image_version != "unknown" and deployed_version != image_version:
-            sync_deployed_snapshot()
+            # A routine code deploy (every push gets a new APP_IMAGE_VERSION =
+            # $GITHUB_SHA) used to call sync_deployed_snapshot() here, which
+            # also overwrites dashboard_data.json/solar_dcr_dashboard.html and
+            # the VAHAN payload/HTML files with whatever was last committed to
+            # git - silently discarding any fresher data the daily scraper
+            # wrote into the persistent workspace since that commit. Code
+            # (index.html, scraper/build scripts) should refresh on every
+            # deploy; scraped *data* should only ever change via an actual
+            # scrape/rebuild job. Use RESET_RUNTIME_WORKSPACE=true (see the
+            # branch above) when a git-committed dashboard content change
+            # genuinely needs to be force-pushed into the runtime workspace.
+            sync_runtime_code()
             marker.write_text(utc_now() + "\n", encoding="utf-8")
             version_marker.write_text(image_version + "\n", encoding="utf-8")
             return
